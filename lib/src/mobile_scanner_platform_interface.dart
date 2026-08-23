@@ -7,6 +7,7 @@ import 'package:mobile_scanner/src/enums/web_barcode_reader.dart';
 import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.dart';
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/camera_device.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -128,6 +129,17 @@ abstract class MobileScannerPlatform extends PlatformInterface {
   /// Toggle the torch on the active camera on or off.
   Future<void> toggleTorch() {
     throw UnimplementedError('toggleTorch() has not been implemented.');
+  }
+
+  /// ARKAN FORK: list every camera this machine can see.
+  ///
+  /// Returns an empty list on platforms that cannot enumerate cameras, so a
+  /// caller can always ask. The [CameraDevice.id] of a returned entry can be
+  /// passed to [start] through [StartOptions.deviceId].
+  ///
+  /// This method can be called before starting the scanner.
+  Future<List<CameraDevice>> listCameras() async {
+    return const <CameraDevice>[];
   }
 
   /// Get the set of supported camera lens types for the current device.

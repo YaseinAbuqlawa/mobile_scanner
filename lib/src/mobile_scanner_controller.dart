@@ -18,6 +18,7 @@ import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.
 import 'package:mobile_scanner/src/mobile_scanner_exception.dart';
 import 'package:mobile_scanner/src/mobile_scanner_platform_interface.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/camera_device.dart';
 import 'package:mobile_scanner/src/objects/mobile_scanner_state.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/switch_camera_option.dart';
@@ -38,6 +39,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     this.invertImage = false,
     this.autoZoom = false,
     this.initialZoom,
+    this.deviceId,
   }) : detectionTimeoutMs =
            detectionSpeed == DetectionSpeed.normal ? detectionTimeoutMs : 0,
        assert(
@@ -97,6 +99,19 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   ///
   /// Currently only supported on iOS and Android.
   final CameraLensType lensType;
+
+  /// ARKAN FORK: the id of the camera to open, from [listCameras].
+  ///
+  /// Wins over [facing] and [lensType]. This is the only way to open a camera
+  /// that no facing direction can name — on macOS, an iPhone acting as a
+  /// Continuity Camera. When null, the camera is chosen exactly as upstream
+  /// does. A camera that has since disappeared falls back to that choice too,
+  /// rather than failing to start.
+  final String? deviceId;
+
+  /// The camera id the scanner was last asked to open, so a restart (after a
+  /// [switchCamera] or a [stop]) reopens the same one.
+  String? _activeDeviceId;
 
   /// The formats that the scanner should detect.
   ///
@@ -400,6 +415,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   Future<void> start({
     CameraFacing? cameraDirection,
     CameraLensType? cameraLensType,
+    String? deviceId,
   }) async {
     if (_isDisposed) {
       throw MobileScannerException(
@@ -468,7 +484,13 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
       value = value.copyWith(isStarting: true);
     }
 
+    // ARKAN FORK: an explicit id for this call wins; otherwise the camera the
+    // operator picked earlier is reopened; otherwise the constructor's.
+    final requestedDeviceId = deviceId ?? _activeDeviceId ?? this.deviceId;
+    _activeDeviceId = requestedDeviceId;
+
     final options = StartOptions(
+      deviceId: requestedDeviceId,
       cameraDirection: cameraDirection ?? facing,
       cameraLensType: cameraLensType ?? lensType,
       cameraResolution: cameraResolution,
@@ -736,6 +758,29 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     }
 
     await MobileScannerPlatform.instance.updateScanWindow(window);
+  }
+
+  /// ARKAN FORK: list every camera this machine can see.
+  ///
+  /// Returns an empty list where the platform cannot enumerate cameras, so the
+  /// caller can always ask and simply offer no choice.
+  ///
+  /// This method can be called before starting the scanner.
+  Future<List<CameraDevice>> listCameras() {
+    return MobileScannerPlatform.instance.listCameras();
+  }
+
+  /// ARKAN FORK: reopen the scanner on the camera with the given [deviceId].
+  ///
+  /// The session is stopped and started again — a capture session cannot swap
+  /// its input device in place. The id is remembered, so any later restart
+  /// stays on the same camera.
+  Future<void> selectCameraDevice(String deviceId) async {
+    _throwIfNotInitialized();
+
+    await stop();
+
+    return start(deviceId: deviceId);
   }
 
   /// Get the set of supported camera lens types for the current device.

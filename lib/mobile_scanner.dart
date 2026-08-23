@@ -21,6 +21,7 @@ export 'src/objects/barcode.dart';
 export 'src/objects/barcode_bytes.dart';
 export 'src/objects/barcode_capture.dart';
 export 'src/objects/calendar_event.dart';
+export 'src/objects/camera_device.dart';
 export 'src/objects/contact_info.dart';
 export 'src/objects/driver_license.dart';
 export 'src/objects/email.dart';

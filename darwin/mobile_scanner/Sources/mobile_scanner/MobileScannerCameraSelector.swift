@@ -10,6 +10,57 @@ enum LensType: Int {
 /// Utility class for camera selection and lens type detection.
 class MobileScannerCameraSelector {
 
+    /// Every video camera this machine can see right now, newest API first.
+    ///
+    /// ARKAN FORK: upstream never enumerates cameras on macOS — it asks for
+    /// `.builtInWideAngleCamera` only, so a Continuity Camera (the owner's
+    /// iPhone) can never be returned. Here the discovery session also asks for
+    /// `.external` and `.continuityCamera` (macOS 14+), and the deprecated
+    /// `devices(for:)` list is merged in for macOS 13, where those device types
+    /// do not exist yet. Results are de-duplicated by `uniqueID`, built-in
+    /// first, so a picker shows a stable order.
+    static func availableCameras() -> [AVCaptureDevice] {
+        var seen = Set<String>()
+        var cameras: [AVCaptureDevice] = []
+
+        func append(_ devices: [AVCaptureDevice]) {
+            for device in devices where seen.insert(device.uniqueID).inserted {
+                cameras.append(device)
+            }
+        }
+
+        if #available(iOS 13.0, macOS 10.15, *) {
+            var deviceTypes: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+#if os(iOS)
+            deviceTypes += [.builtInUltraWideCamera, .builtInTelephotoCamera]
+#else
+            if #available(macOS 14.0, *) {
+                deviceTypes += [.external, .continuityCamera]
+            }
+#endif
+            append(
+                AVCaptureDevice.DiscoverySession(
+                    deviceTypes: deviceTypes,
+                    mediaType: .video,
+                    position: .unspecified
+                ).devices
+            )
+        }
+
+        // macOS 13 and older: `.external` / `.continuityCamera` do not exist,
+        // and the discovery session above therefore misses the iPhone. The
+        // deprecated flat list still carries it.
+        append(AVCaptureDevice.devices(for: .video))
+
+        return cameras
+    }
+
+    /// The camera with this `uniqueID`, or nil when it is gone — the iPhone
+    /// walked out of the shop, or the webcam was unplugged.
+    static func camera(withUniqueID uniqueID: String) -> AVCaptureDevice? {
+        return availableCameras().first { $0.uniqueID == uniqueID }
+    }
+
     /// Maps an AVCaptureDevice.DeviceType to a LensType.
     ///
     /// - Parameter deviceType: The device type to map

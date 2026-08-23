@@ -104,6 +104,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             start(call, result)
         case "toggleTorch":
             toggleTorch(result)
+        case "listCameras":
+            listCameras(result)
         case "getSupportedLenses":
             getSupportedLenses(call, result)
         case "getBestCloseRangeScanningLens":
@@ -369,6 +371,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         let argReader = MapArgumentReader(call.arguments as? [String: Any])
 
         let torch:Bool = argReader.bool(key: "torch") ?? false
+        // ARKAN FORK: an explicit camera, chosen by the operator, wins over
+        // facing/lens. Absent (the upstream case) nothing changes.
+        let deviceId:String? = argReader.string(key: "deviceId")
         let facing:Int = argReader.int(key: "facing") ?? 1
         let lensType:Int = argReader.int(key: "lensType") ?? -1
         let speed:Int = argReader.int(key: "speed") ?? 0
@@ -386,15 +391,26 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         timeoutSeconds = Double(timeoutMs) / 1000.0
         detectionSpeed = DetectionSpeed(rawValue: speed)!
 
-        // Set the camera to use. In macOS only a front camera is available.
+        // ARKAN FORK: a chosen camera id opens THAT camera, whatever it is —
+        // a built-in webcam, a USB camera, or an iPhone acting as a Continuity
+        // Camera. `position` follows the device so mirroring below stays right.
+        // A stored id whose camera has since gone (the iPhone left the shop)
+        // falls through to the normal selection rather than failing to start.
+        if let deviceId = deviceId,
+           let chosenDevice = MobileScannerCameraSelector.camera(withUniqueID: deviceId) {
+            device = chosenDevice
+            position = chosenDevice.position
+        } else {
+            // Set the camera to use. In macOS only a front camera is available.
 #if os(iOS)
-        position = facing == 0 ? AVCaptureDevice.Position.front : .back
+            position = facing == 0 ? AVCaptureDevice.Position.front : .back
 #else
-        position = AVCaptureDevice.Position.front
+            position = AVCaptureDevice.Position.front
 #endif
 
-        // Open the camera device based on position and lens type
-        device = MobileScannerCameraSelector.selectCamera(position: position, lensType: lensType)
+            // Open the camera device based on position and lens type
+            device = MobileScannerCameraSelector.selectCamera(position: position, lensType: lensType)
+        }
 
         if (device == nil) {
             result(FlutterError(code: MobileScannerErrorCodes.NO_CAMERA_ERROR,
@@ -559,6 +575,37 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         
         // Ultimate fallback: use the original default format
         return kCVPixelFormatType_32BGRA
+    }
+
+    /// ARKAN FORK: every camera this machine can see, for an in-app picker.
+    ///
+    /// Upstream offers front/back and a lens type, which on macOS can only ever
+    /// mean the built-in camera. A shop counter has more: a USB camera, and the
+    /// owner's iPhone as a Continuity Camera — the only one that can be carried
+    /// to a pallet of boxes.
+    private func listCameras(_ result: @escaping FlutterResult) {
+        let cameras: [[String: Any?]] = MobileScannerCameraSelector.availableCameras().map { device in
+            var isBuiltIn = true
+            var isContinuity = false
+
+            if #available(iOS 13.0, macOS 10.15, *) {
+#if os(macOS)
+                isBuiltIn = device.deviceType == .builtInWideAngleCamera
+                if #available(macOS 14.0, *) {
+                    isContinuity = device.deviceType == .continuityCamera
+                }
+#endif
+            }
+
+            return [
+                "id": device.uniqueID,
+                "name": device.localizedName,
+                "isBuiltIn": isBuiltIn,
+                "isContinuity": isContinuity,
+            ]
+        }
+
+        result(cameras)
     }
 
     private func getSupportedLenses(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {

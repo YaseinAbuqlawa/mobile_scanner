@@ -20,10 +20,19 @@ class StartOptions {
     required this.invertImage,
     required this.autoZoom,
     required this.initialZoom,
+    this.deviceId,
   });
 
   /// The direction for the camera.
   final CameraFacing cameraDirection;
+
+  /// ARKAN FORK: the id of a specific camera to open, from
+  /// `MobileScannerPlatform.listCameras()`.
+  ///
+  /// When set, it wins over [cameraDirection] and [cameraLensType] — that is
+  /// what lets macOS open an iPhone Continuity Camera, which no facing
+  /// direction can name. When null, the upstream behaviour is unchanged.
+  final String? deviceId;
 
   /// The desired camera resolution for the scanner.
   final Size? cameraResolution;
@@ -76,6 +85,7 @@ class StartOptions {
           cameraResolution!.width.toInt(),
           cameraResolution!.height.toInt(),
         ],
+      if (deviceId != null) 'deviceId': deviceId,
       'facing': cameraDirection.rawValue,
       'lensType': cameraLensType.rawValue,
       if (formats.isNotEmpty)

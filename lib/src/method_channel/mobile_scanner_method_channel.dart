@@ -16,6 +16,7 @@ import 'package:mobile_scanner/src/mobile_scanner_platform_interface.dart';
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/camera_device.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/utils/parse_device_orientation_extension.dart';
 
@@ -86,6 +87,10 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   /// The name of the method that updates the scan window.
   @visibleForTesting
   static const String kUpdateScanWindowMethodName = 'updateScanWindow';
+
+  /// ARKAN FORK: the name of the method that lists the available cameras.
+  @visibleForTesting
+  static const String kListCamerasMethodName = 'listCameras';
 
   /// The name of the method that gets the supported camera lenses.
   @visibleForTesting
@@ -503,6 +508,33 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
     await methodChannel.invokeMethod<void>(kUpdateScanWindowMethodName, {
       'rect': points,
     });
+  }
+
+  @override
+  Future<List<CameraDevice>> listCameras() async {
+    final List<Object?>? cameras;
+
+    try {
+      cameras = await methodChannel.invokeListMethod<Object?>(
+        kListCamerasMethodName,
+      );
+    } on PlatformException {
+      // A platform that cannot enumerate cameras is not an error for the
+      // caller: it simply has no choice to offer.
+      return const <CameraDevice>[];
+    } on MissingPluginException {
+      return const <CameraDevice>[];
+    }
+
+    if (cameras == null) {
+      return const <CameraDevice>[];
+    }
+
+    return cameras
+        .whereType<Map<Object?, Object?>>()
+        .map(CameraDevice.fromMap)
+        .whereType<CameraDevice>()
+        .toList();
   }
 
   @override

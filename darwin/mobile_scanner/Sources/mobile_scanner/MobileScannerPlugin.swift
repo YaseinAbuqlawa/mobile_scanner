@@ -56,6 +56,16 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     var interfaceOrientationObserver: NSObjectProtocol?
 #endif
 
+#if os(macOS)
+    /// ARKAN FORK: tells us which way the iPhone on Continuity Camera is held.
+    private var rotationCoordinator: AnyObject?
+    private var rotationObservation: NSKeyValueObservation?
+    /// The connection whose frames are turned as the phone turns.
+    private weak var rotatingConnection: AVCaptureConnection?
+    /// Owns the deviceOrientation event channel on macOS.
+    private static let orientationStreamHandler = MacOrientationStreamHandler()
+#endif
+
     private var stopped: Bool {
         return device == nil || captureSession == nil
     }
@@ -82,10 +92,14 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         registrar.addMethodCallDelegate(instance, channel: method)
         event.setStreamHandler(instance)
 
-#if os(iOS)
         let orientationEvent = FlutterEventChannel(name:
                                             "dev.steenbakker.mobile_scanner/scanner/deviceOrientation", binaryMessenger: messenger)
+#if os(iOS)
         orientationEvent.setStreamHandler(DeviceOrientationStreamHandler())
+#else
+        // ARKAN FORK: on macOS the orientation comes from the camera (an iPhone
+        // being turned), not from the machine's own screen.
+        orientationEvent.setStreamHandler(orientationStreamHandler)
 #endif
     }
     
@@ -465,6 +479,17 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
         captureSession!.sessionPreset = AVCaptureSession.Preset.high
 
+#if os(macOS)
+        // ARKAN FORK: pick a real VIDEO format - widescreen, and as fast as the
+        // camera will run up to 60fps. The preset alone leaves an iPhone on
+        // Continuity Camera in a photo-shaped 30fps mode, which looks wrong
+        // beside the label and smears a barcode that is moving.
+        //
+        // AFTER the preset on purpose: a preset assignment throws away a
+        // hand-picked format, so choosing first would choose nothing.
+        _ = selectVideoFormat(for: device)
+#endif
+
         let videoOutput = AVCaptureVideoDataOutput()
 
         let format = getPreferredVideoFormat(videoOutput: videoOutput)
@@ -495,6 +520,11 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             if position == .front && connection.isVideoMirroringSupported && isBuiltInCamera(device) {
                 connection.isVideoMirrored = true
             }
+
+#if os(macOS)
+            // ARKAN FORK: turn the frames as the phone turns.
+            startRotationTracking(device: device, connection: connection)
+#endif
         }
 
         captureSession!.commitConfiguration()
@@ -551,7 +581,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         "size": size,
                         "currentTorchState": device.hasTorch ? device.torchMode.rawValue : -1,
                         "cameraDirection": cameraDirection,
-                        "initialDeviceOrientation": deviceVideoOrientation.toOrientationString
+                        "initialDeviceOrientation": self.initialOrientationString(fallback: deviceVideoOrientation.toOrientationString)
                     ]
                 } else {
                     answer = [
@@ -593,6 +623,141 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         // Ultimate fallback: use the original default format
         return kCVPixelFormatType_32BGRA
     }
+
+    /// ARKAN FORK: the orientation Flutter should start with — on macOS what the
+    /// phone is doing right now, rather than what a Mac screen is doing.
+    private func initialOrientationString(fallback: String) -> String {
+#if os(macOS)
+        if #available(macOS 14.0, *),
+           let coordinator = rotationCoordinator as? AVCaptureDevice.RotationCoordinator {
+            return orientationString(
+                forRotationAngle: coordinator.videoRotationAngleForHorizonLevelCapture
+            )
+        }
+#endif
+        return fallback
+    }
+
+#if os(macOS)
+    /// ARKAN FORK: follow the camera's own idea of "up".
+    ///
+    /// `RotationCoordinator` (macOS 14+) reports the angle that would put the
+    /// horizon level — for an iPhone on Continuity Camera that is the phone
+    /// being turned in the operator's hand. Each change turns the frames AND
+    /// tells Flutter, which sizes the preview from the dimensions it was given
+    /// and would otherwise stretch a frame that had quietly stood up.
+    private func startRotationTracking(device: AVCaptureDevice, connection: AVCaptureConnection) {
+        guard #available(macOS 14.0, *) else {
+            return
+        }
+
+        rotatingConnection = connection
+
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+
+        applyRotation(coordinator.videoRotationAngleForHorizonLevelCapture)
+
+        rotationObservation = coordinator.observe(
+            \.videoRotationAngleForHorizonLevelCapture,
+            options: [.new]
+        ) { [weak self] _, change in
+            guard let self = self, let angle = change.newValue else {
+                return
+            }
+            DispatchQueue.main.async {
+                self.applyRotation(angle)
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func applyRotation(_ angle: CGFloat) {
+        guard let connection = rotatingConnection else {
+            return
+        }
+
+        // A camera that cannot be turned keeps its frames; saying so to Flutter
+        // anyway would stretch a preview that never moved.
+        guard connection.isVideoRotationAngleSupported(angle) else {
+            return
+        }
+
+        connection.videoRotationAngle = angle
+        MobileScannerPlugin.orientationStreamHandler.send(
+            orientationString(forRotationAngle: angle)
+        )
+    }
+
+    private func stopRotationTracking() {
+        rotationObservation?.invalidate()
+        rotationObservation = nil
+        rotationCoordinator = nil
+        rotatingConnection = nil
+    }
+
+    /// ARKAN FORK: the widest 60fps format the camera offers, capped at 1080p.
+    ///
+    /// Beyond 1080p costs frames and gains no barcode: the label is close and
+    /// the scan window is a fraction of the frame. Returns false when nothing
+    /// better than the default is on offer, so the caller keeps the preset.
+    private func selectVideoFormat(for device: AVCaptureDevice) -> Bool {
+        var best: AVCaptureDevice.Format?
+        var bestScore: (fps: Double, widescreen: Bool, width: Int32) = (0, false, 0)
+
+        for format in device.formats {
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dimensions.width > 0, dimensions.height > 0, dimensions.width <= 1920 else {
+                continue
+            }
+
+            let fps = min(
+                format.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0,
+                60
+            )
+            let ratio = Double(dimensions.width) / Double(dimensions.height)
+            let widescreen = abs(ratio - (16.0 / 9.0)) < 0.05
+            let score = (fps: fps, widescreen: widescreen, width: dimensions.width)
+
+            let better: Bool
+            if score.fps != bestScore.fps {
+                better = score.fps > bestScore.fps
+            } else if score.widescreen != bestScore.widescreen {
+                better = score.widescreen
+            } else {
+                better = score.width > bestScore.width
+            }
+
+            if better {
+                best = format
+                bestScore = score
+            }
+        }
+
+        guard let chosen = best, bestScore.fps > 0 else {
+            return false
+        }
+
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
+            device.activeFormat = chosen
+            // Only the MINIMUM duration is set: it raises the ceiling to 60fps
+            // without forcing 60 in a dark stockroom, where a pinned frame rate
+            // buys a darker, noisier picture and a harder barcode to read.
+            device.activeVideoMinFrameDuration = CMTime(
+                value: 1,
+                timescale: CMTimeScale(bestScore.fps.rounded())
+            )
+        } catch {
+            // The camera kept its own format; the preset still gives a picture.
+            return false
+        }
+
+        return true
+    }
+#endif
 
     /// ARKAN FORK: whether this camera is part of the machine itself, rather
     /// than a USB camera or an iPhone on Continuity Camera.
@@ -965,6 +1130,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     private func releaseCamera() {
 #if os(iOS)
         removeInterfaceOrientationObserver()
+#else
+        // ARKAN FORK: the phone is no longer ours to follow.
+        stopRotationTracking()
 #endif
 
         if let captureSession = captureSession {

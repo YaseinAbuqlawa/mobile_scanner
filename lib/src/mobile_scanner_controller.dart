@@ -241,9 +241,12 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
           value = value.copyWith(zoomScale: zoomScale);
         });
 
+    // ARKAN FORK: macOS is no longer excluded. Upstream never sent orientation
+    // events there, so listening was pointless; this fork sends them from the
+    // camera itself (an iPhone on Continuity Camera being turned in the hand),
+    // and the preview is sized from them.
     if (MobileScannerPlatform.instance
-        case final MethodChannelMobileScanner implementation
-        when defaultTargetPlatform != TargetPlatform.macOS) {
+        case final MethodChannelMobileScanner implementation) {
       _deviceOrientationSubscription = implementation
           .deviceOrientationChangedStream
           .listen((orientation) {

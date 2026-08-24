@@ -419,6 +419,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             return
         }
 
+        // ARKAN FORK: before the session is configured, so the first frame is
+        // already still.
+        disableCentreStage()
+
         device.addObserver(self, forKeyPath: #keyPath(AVCaptureDevice.torchMode), options: .new, context: nil)
 #if os(iOS)
         device.addObserver(self, forKeyPath: #keyPath(AVCaptureDevice.videoZoomFactor), options: [.new, .initial], context: nil)
@@ -471,11 +475,24 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         let deviceVideoOrientation = self.getVideoOrientation()
 
         if let connection = videoOutput.connections.first {
+            // ARKAN FORK: only iOS knows which way the screen is turned, so
+            // only iOS may rotate the frames. macOS asked for portrait too, and
+            // its built-in camera silently refused (it cannot rotate) while an
+            // iPhone on Continuity Camera obeyed - turning the picture 90 deg
+            // against a size that was never rotated with it, so the preview came
+            // out sideways and stretched. Left alone, every Mac camera delivers
+            // its natural landscape frame, which is what the reported size says.
+#if os(iOS)
             if connection.isVideoOrientationSupported {
                 connection.videoOrientation = deviceVideoOrientation
             }
+#endif
 
-            if position == .front && connection.isVideoMirroringSupported {
+            // ARKAN FORK: mirroring is for a camera you look INTO. A phone or a
+            // Mac's own webcam qualifies; an iPhone on a stand pointed at a box
+            // does not, and macOS may still report it as a front camera. Mirror
+            // only built-in cameras, or the operator reads every label backwards.
+            if position == .front && connection.isVideoMirroringSupported && isBuiltInCamera(device) {
                 connection.isVideoMirrored = true
             }
         }
@@ -575,6 +592,41 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         
         // Ultimate fallback: use the original default format
         return kCVPixelFormatType_32BGRA
+    }
+
+    /// ARKAN FORK: whether this camera is part of the machine itself, rather
+    /// than a USB camera or an iPhone on Continuity Camera.
+    private func isBuiltInCamera(_ device: AVCaptureDevice?) -> Bool {
+        guard let device = device else {
+            return true
+        }
+
+#if os(macOS)
+        if #available(macOS 10.15, *) {
+            return device.deviceType == .builtInWideAngleCamera
+        }
+#endif
+        return true
+    }
+
+    /// ARKAN FORK: turn Centre Stage off for the session.
+    ///
+    /// macOS turns it on by default for a Continuity Camera: the frame pans and
+    /// zooms to follow a person. Aimed at a shelf of boxes it wanders on its
+    /// own, moving the barcode out of the scan window mid-read. Scanning wants a
+    /// camera that holds still.
+    ///
+    /// Portrait blur and Studio Light cannot be switched off by an app - they
+    /// stay in the operator's Control Centre.
+    private func disableCentreStage() {
+#if os(macOS)
+        if #available(macOS 12.3, *) {
+            // Enabling/disabling raises an exception unless the app owns the
+            // control, so claim it first.
+            AVCaptureDevice.centerStageControlMode = .app
+            AVCaptureDevice.isCenterStageEnabled = false
+        }
+#endif
     }
 
     /// ARKAN FORK: every camera this machine can see, for an in-app picker.
